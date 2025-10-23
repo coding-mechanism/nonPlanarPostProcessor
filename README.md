@@ -32,3 +32,4 @@ Upload both files into script:
 It rotates and centers the top surface on top of the rest of the object. 
 Also changes the gcode paths to zig zag on the top surface instead of moving through the object on travel moves
  
+<img width="1920" height="677" alt="image" src="https://github.com/user-attachments/assets/d6991625-e38b-4501-ad6e-464e3f3c5e60" />
