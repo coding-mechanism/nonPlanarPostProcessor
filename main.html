@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Combine: Top Surface on Scaffold</title>
+</head>
+<body>
+
+    <div class="controls">
+    <div>
+        <label>Scaffold G-code <input id="fileScaf" onchange="fileScaf(event)" type="file" accept=".gcode,.txt"></label>
+    </div>
+    <div>
+        <label>Top Surface G-code <input id="fileModel" onchange="fileModel(event)" type="file" accept=".gcode,.txt"></label>
+    </div>
+    <div>
+    <label>Gap above scaffold (mm)
+      <input id="gap" type="number" value="0.20" step="0.05" style="width:80px">
+    </label>
+    <br>
+    <br>
+    <label>Acts as a rotation (negative sign must be after axis)</label>
+    <div>
+    <label>Sub X with:
+        <input id="subX" type="text" value="X" style="width: 80px">
+    </label>
+    </div>
+    <div>
+    <label>Sub Y with:
+        <input id="subY" type="text" value="Y" style="width: 80px">
+    </label>
+    </div>
+    <div>
+    <label>Sub Z with:
+        <input id="subZ" type="text" value="Z" style="width: 80px">
+    </label>
+    </div>
+    </div>
+    <button id="btnCombine" onclick="main()">Make Combined (no download)</button>
+    </div>
+    <textarea id="textAreaOut" style="width:min-content; height: 50vh"></textarea>
+
+<script>
+    let modelGcode = [];
+    let scaffoldGcode = [];
+
+    async function fileScaf(event){
+        let data = event.target.files[0]
+        scaffoldGcode = await data.text();
+
+    }
+
+    async function fileModel(event){
+        let data = event.target.files[0]
+        modelGcode = await data.text();
+    }
+
+
+    function main(){
+        let gap = document.getElementById("gap").value;
+        let mGcode = splitFile(modelGcode);
+        let sGcode = splitFile(scaffoldGcode);
+        let subArray = getXYZsubs();
+        let rotatedGcode = rotateSurface(subArray[0], subArray[1], subArray[2], mGcode);
+        let boundingBoxTopSurface = findObjectBoundingBox(rotatedGcode);
+        let boundingBoxScaffold = findObjectBoundingBox(scaffoldGcode);
+        let centerTopOfTopSurface = {
+            x: boundingBoxTopSurface.maxX - ((Math.abs(boundingBoxTopSurface.maxX)-Math.abs(boundingBoxTopSurface.minX))/2),
+            y: boundingBoxTopSurface.maxY - ((Math.abs(boundingBoxTopSurface.maxY)-Math.abs(boundingBoxTopSurface.minY))/2),
+            z: boundingBoxTopSurface.maxZ}
+        let centerTopOfScaffold = {
+            x: boundingBoxScaffold.maxX - ((Math.abs(boundingBoxScaffold.maxX)-Math.abs(boundingBoxScaffold.minX))/2),
+            y: boundingBoxScaffold.maxY - ((Math.abs(boundingBoxScaffold.maxY)-Math.abs(boundingBoxScaffold.minY))/2),
+            z: boundingBoxScaffold.maxZ}
+
+        let translatedGcode = translateObject(centerTopOfScaffold, centerTopOfTopSurface, 0, 0, parseFloat(gap), rotatedGcode);
+        let zigZagGcode = alternateGcodePaths(translatedGcode);
+        let combinedFiles = combineFiles(sGcode, zigZagGcode);
+        updateCombinedTextArea(combinedFiles);
+    }
+    
+    function rotateSurface(newX, newY, newZ, gcode){
+        let fEO = findExcludeObject(gcode);
+        let EOS = fEO[0];
+        let EOE = fEO[1];
+        let outputGcode = "";
+        let extrusionArray = [];
+        let layer = [];
+        let beforeObjectStart = "";
+        let afterObjectStart = "";
+        for (let i = 0; i < EOS; i++){
+            beforeObjectStart += (gcode[i] + '\n');
+        }
+        for(let i = EOE; i < gcode.length; i++){
+            afterObjectStart += (gcode[i] + '\n');
+        }
+
+        for(let i = EOS; i < EOE; i++){
+            layer.push(gcode[i]);
+            if(gcode[i] == ";LAYER_CHANGE"){
+                extrusionArray.push(layer);
+                layer = [];
+            }
+        }
+        extrusionArray.push(layer);
+
+        for(let i = 0; i < extrusionArray.length; i++){
+            
+            for(let j = 0; j < extrusionArray[i].length; j++){
+                if(extrusionArray[i][j].match("G(0|1)")){
+                let charArray = extrusionArray[i][j].split("");
+                for(let c = 0; c < charArray.length; c++){
+                    if(charArray[c] == "X"){
+                        if(newX > 1){
+                            charArray.splice(c, 0, "-");
+                            charArray.splice(c, 0, newX[0]);
+                        }
+                        else {
+                            charArray[c] = newX;
+                        }
+                        continue;
+                    }
+                    if(charArray[c] == "Y"){
+                        if(newY > 1){
+                            charArray.splice(c, 0, "-");
+                            charArray.splice(c, 0, newY[0]);
+                        } else{
+                        charArray[c] = newY;
+                        }
+                        continue;
+                        
+                    }
+                    if(charArray[c] == "Z"){
+                        if(newZ > 1){
+                            charArray.splice(c, 0, "-");
+                            charArray.splice(c, 0, newZ[0]);
+                        } else {
+                            charArray[c] = newZ;
+                        }
+                        continue;                        
+                    }
+                }
+
+                let charString = "";
+                for(let c = 0; c < charArray.length; c++){
+                    charString += charArray[c];
+                }
+                extrusionArray[i][j] = charString + '\n';
+
+            }
+            else{
+                extrusionArray[i][j] += '\n'
+            }
+            outputGcode += extrusionArray[i][j];
+        
+        }
+    }
+
+        return beforeObjectStart + outputGcode +  afterObjectStart;
+
+
+    }
+    function combineFiles(scaffoldFile, topSurfaceFileString){
+        let FEO = findExcludeObject(scaffoldFile)
+        let EOE = FEO[1];
+        combinedString = "";
+        for(let i = 0; i < scaffoldFile.length; i++){
+            if(i < EOE){
+                combinedString += scaffoldFile[i] + '\n';
+            }
+            if(i == EOE){
+                combinedString += topSurfaceFileString;
+            }
+            if(i >= EOE){
+                combinedString += scaffoldFile[i] + '\n'
+            }
+        }
+        return combinedString;
+    }
+    function findObjectBoundingBox(gcode){
+        let FEO = findExcludeObject(gcode);
+        let EOS = FEO[0];
+        let EOE = FEO[1];
+        let gcodeLines = gcode.split("\n");
+        let boundingBox = {minX: 0, maxX: 0, minY: 0, maxY: 0, minZ: 0, maxZ: 0};
+        for(let i = EOS; i < EOE; i++){
+            if(gcodeLines[i].match("G1")){
+                let coordinates = extractCoordinatesFromGcodeLine(gcodeLines[i]);                
+
+                if(coordinates.x && boundingBox.minX && coordinates.x < boundingBox.minX){
+                    boundingBox.minX = coordinates.x;
+                } else {
+                    if(coordinates.x && !boundingBox.minX){
+                        boundingBox.minX = coordinates.x;
+                        boundingBox.maxX = coordinates.x;
+                    }
+                }
+                if(coordinates.x && coordinates.x > boundingBox.maxX){
+                    boundingBox.maxX = coordinates.x;
+                }
+
+                if(coordinates.y && boundingBox.minY && coordinates.y < boundingBox.minY){
+                    boundingBox.minY = coordinates.y;
+                } else {
+                    if(coordinates.y && !boundingBox.minY){
+                        boundingBox.minY = coordinates.y;
+                        boundingBox.maxY = coordinates.y;
+                    }
+                }
+                if(coordinates.y && coordinates.y > boundingBox.maxY){
+                    boundingBox.maxY = coordinates.y;
+                }
+
+                if(coordinates.z && boundingBox.minZ && coordinates.z < boundingBox.minZ){
+                    boundingBox.minZ = coordinates.z;
+                } else {
+                    if(coordinates.z && !boundingBox.minZ){
+                        boundingBox.minZ = coordinates.z;
+                        boundingBox.maxZ = coordinates.z;
+                    }
+                }
+                if(coordinates.z && coordinates.z > boundingBox.maxZ){
+                    boundingBox.maxZ = coordinates.z;
+                }
+
+            }
+        }
+        return boundingBox;
+    }
+    function translateObject(centerScaff, centerTop, shiftX, shiftY, shiftZ, gcodeString){
+        let xTranslate = (centerScaff.x - centerTop.x);
+        let yTranslate = (centerScaff.y - centerTop.y);
+        let zTranslate = (centerScaff.z - centerTop.z);
+        let gcodeArray = gcodeString.split("\n");
+        let FEO = findExcludeObject(gcodeArray);
+        let EOS = FEO[0];
+        let EOE = FEO[1];
+
+        let translatedGcode = "";
+        
+        for(let i = 0; i < gcodeArray.length; i++){
+            if((i <= EOS) || (i >= EOE)){
+                translatedGcode += gcodeArray[i] + '\n';
+            }
+            if(i > EOS && i< EOE){
+                if(gcodeArray[i].match("^G1")){
+                    let splitted = gcodeArray[i].split(" ");
+                    let strung = `${splitted[0]} `;
+                    for(let j = 0; j < splitted.length; j++){
+                        if(splitted[j].match("X")){
+                            let xInit = parseFloat(splitted[j].split("X")[1]);
+                            strung += `X${(xInit + xTranslate + shiftX)} `;                            
+                        }
+                        if(splitted[j].match("Y")){
+                            let yInit = parseFloat(splitted[j].split("Y")[1]);
+                            strung += `Y${(yInit + yTranslate + shiftY)} `;
+                        }
+                        if(splitted[j].match("Z")){
+                            let zInit = parseFloat(splitted[j].split("Z")[1]);
+                            strung += `Z${(zInit + zTranslate) + shiftZ} `;
+                        }
+                        if(splitted[j].match("E")){
+                            strung += `${splitted[j]}`;
+                        }
+                        if(splitted[j].match("F")){
+                            strung += `${splitted[j]}`;
+                        }
+                    }
+                    translatedGcode += strung + '\n';
+                } else {
+                    translatedGcode += gcodeArray[i] + '\n';
+                }
+        }
+        } 
+        return translatedGcode;
+
+    }
+    function extractCoordinatesFromGcodeLine(gcodeLineString){
+        let coordinates = {x: null, y: null, z: null, e: null};
+        let gcodeArray = gcodeLineString.split(" ");
+        if(gcodeArray[0] != ";"){
+        for(let i = 0; i < gcodeArray.length; i++){
+            if(gcodeArray[i][0] == "X"){
+                coordinates.x = parseFloat(gcodeArray[i].match("(-|)(|[0-9]+)(|.)[0-9]+$")[0]);
+            }
+            if(gcodeArray[i][0] == "Y"){                
+                coordinates.y = parseFloat(gcodeArray[i].match("(-|)(|[0-9]+)(|.)[0-9]+$")[0]);
+            }
+            if(gcodeArray[i][0] == "Z"){
+                coordinates.z = parseFloat(gcodeArray[i].match("(-|)(|[0-9]+)(|.)[0-9]+$")[0]);
+            }
+            if(gcodeArray[i][0] == "E"){
+                coordinates.e = parseFloat(gcodeArray[i].match("(-|)(|[0-9]+)(|.)[0-9]+$")[0]);
+            }
+            
+        }
+    }
+        return coordinates;
+    }
+    function findExcludeObject(gcode){
+        for(let i = 0; i < gcode.length; i++){
+            if(gcode[i].match("EXCLUDE_OBJECT_START NAME")){
+                EOS = i;
+            }
+            if(gcode[i].match("EXCLUDE_OBJECT_END NAME")){
+                EOE = i;
+            }
+        }        
+        return [EOS, EOE];
+    }
+    function alternateGcodePaths(gcodeString){
+        let gcodeArray = gcodeString.split("\n");
+        let FEO = findExcludeObject(gcodeArray);
+        let EOS = FEO[0];
+        let EOE = FEO[1];
+        let layer = {lines: []};
+        let extrusionArrayObject = [];
+        let outputGcode = [];
+        let beforeEOSGcode = "";
+        let afterEOEGcode = "";
+        let betweenEOSEOE = "";
+        for(let i = 0; i < gcodeArray.length; i++){
+            if(i<=EOS){
+                beforeEOSGcode += (gcodeArray[i] + '\n');
+            }
+            if(i>=EOE){
+                afterEOEGcode += (gcodeArray[i] + '\n');
+            }
+        }
+
+        for(let i = EOS; i < EOE; i++){
+            let line = {line: gcodeArray[i], e: false};
+            if(gcodeArray[i].match("G1") && (gcodeArray[i].match("E"))){
+                line.e = true;
+            }
+            layer.lines.push(line);
+            if(gcodeArray[i].match(";LAYER_CHANGE")){
+                extrusionArrayObject.push(layer);
+                layer = {lines: []};
+            }
+        }
+        // move first g1 before extrusion to the end with extrusion, e values shifted so it's extruded, the previous first E move
+        // should not have an e move anymore
+        // G1 Y130.096 Z4.9269999999999925 
+        for(let i = 0; i < extrusionArrayObject.length; i++){
+            for(let j = 0; j< extrusionArrayObject[i].lines.length; j++){
+                if(extrusionArrayObject[i].lines[j].e == true){
+                    let split = extrusionArrayObject[i].lines[j].line.split("E");
+                    extrusionArrayObject[i].lines[j].coords = split[0];
+                    extrusionArrayObject[i].lines[j].eCoord = `E${split[1]}`;
+                }
+            }
+        }
+        for(let i = 0; i < extrusionArrayObject.length; i++){
+            if((i+1)%2 == 0){
+            let fixedEMoveArray = fixMisplacedEMove(extrusionArrayObject[i]); 
+            let reversedCoords = reverseCoordinates(fixedEMoveArray);
+
+            let firstE = 0;
+            for(let j = 0; j < extrusionArrayObject[i].lines.length; j++){
+                if(extrusionArrayObject[i].lines[j].e == true){
+                    extrusionArrayObject[i].lines[j].coords = reversedCoords[j-firstE];
+                } else {
+                    firstE++;
+                }
+            }
+        } else {
+            let jumpIndex = 0;
+            for(let j = 0; j < extrusionArrayObject[i].lines.length; j++){
+                if(extrusionArrayObject[i].lines[j].line.match("^G1 [X-Z].+ [X-Z].+ [X-Z].+ F")){
+                    jumpIndex = j;
+                }
+            }
+            extrusionArrayObject[i].lines.splice(jumpIndex, 1);
+        }
+        }
+        let strung = "";
+        for(let i = 0; i < extrusionArrayObject.length; i++){
+            let layerString = "";
+            for(let j = 0; j < extrusionArrayObject[i].lines.length; j++){
+                if(extrusionArrayObject[i].lines[j].e == true){
+                    layerString+= (extrusionArrayObject[i].lines[j].coords + extrusionArrayObject[i].lines[j].eCoord + '\n');
+                } else {
+                    layerString+= extrusionArrayObject[i].lines[j].line + '\n';
+                }
+            }
+            strung+= layerString;
+        }
+
+
+
+        return strung;
+    }
+    function fixMisplacedEMove(layer){
+        let firstE = 0;
+        let misplacedE = 0;
+        for(let line = 0; line < layer.lines.length; line++){
+            if(layer.lines[line].line.match("^G1.+E")){
+                firstE = line;
+                break;
+            }
+               if(layer.lines[line].line.match("^G1 [X-Z].+ [X-Z].+ [X-Z].+ F")){
+                layer.lines[line+1].e = true;
+                layer.lines[line+1].eCoord = "E0";
+                layer.lines[line+1].coords = layer.lines[line+1].line;
+                misplacedE = line+1;
+            }
+        }
+        layer.lines.splice(firstE, 0, layer.lines[misplacedE]);
+        layer.lines.splice(misplacedE-1, 2);
+        return layer;
+    }
+    function reverseCoordinates(layer){
+        let layerReversed = [];
+        for(let i = layer.lines.length - 1; i >= 0; i--){
+            if((layer.lines[i].e == true)){
+                layerReversed.push(layer.lines[i].coords);
+            }
+        }
+        return layerReversed;
+    }
+    function updateCombinedTextArea(text){
+        document.getElementById("textAreaOut").value = text;
+    }
+    function splitFile(file){
+        return file.split("\n");
+    }
+    function getXYZsubs(){        
+        return [document.getElementById("subX").value,
+        document.getElementById("subY").value,
+        document.getElementById("subZ").value]
+    }
+  
+  </script>
+  </body>
+  </html>
